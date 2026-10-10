@@ -1,0 +1,583 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weight-Space Atlas</title>
+<style>
+  :root {
+    --ink: #111;
+    --ink-2: #6b6b6b;
+    --rule: #d8d8d8;
+    color-scheme: light;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #fff; color: var(--ink);
+    font: 12px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; overflow: hidden; }
+  #map { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+  #map.dragging { cursor: grabbing; }
+  #map.over { cursor: pointer; }
+
+  header { position: fixed; top: 20px; left: 24px; background: #fff; padding: 0 8px 6px 0; }
+  h1 { margin: 0; font: inherit; font-weight: 600; }
+  header p { margin: 0; color: var(--ink-2); }
+  #search { display: block; margin-top: 14px; width: 180px; padding: 2px 0; border: 0; border-bottom: 1px solid var(--rule);
+    background: transparent; color: var(--ink); font: inherit; border-radius: 0; outline: none; }
+  #search:focus { border-bottom-color: var(--ink); }
+  #search::-webkit-search-cancel-button { display: none; }
+  #count { color: var(--ink-2); }
+  .toggle { margin-top: 10px !important; color: var(--ink-2); }
+  .toggle a { color: var(--ink); cursor: pointer; text-decoration: none; }
+  .toggle a.off { color: var(--ink-2); text-decoration: underline; text-underline-offset: 2px; }
+  .toggle a.off:hover { color: var(--ink); }
+
+  aside { position: fixed; top: 20px; right: 24px; width: 168px; background: #fff; }
+  aside canvas { display: block; width: 168px; height: 168px; }
+  .dim { color: var(--ink-2); }
+  #hover, #morph { display: none; }
+  #hover.on, #morph.on { display: block; }
+  #morph { margin-top: 28px; }
+  #morph .ends { margin-top: 6px; }
+  input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; margin: 10px 0 6px; background: transparent; }
+  input[type=range]::-webkit-slider-runnable-track { height: 1px; background: var(--ink); }
+  input[type=range]::-moz-range-track { height: 1px; background: var(--ink); }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 7px; height: 13px; margin-top: -6px; background: var(--ink); border: 0; border-radius: 0; }
+  input[type=range]::-moz-range-thumb { width: 7px; height: 13px; background: var(--ink); border: 0; border-radius: 0; }
+  .links a { color: var(--ink-2); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; margin-right: 12px; }
+  .links a:hover { color: var(--ink); }
+
+  footer { position: fixed; left: 24px; bottom: 18px; color: var(--ink-2); background: #fff; padding-right: 8px; }
+  #loader { position: fixed; inset: 0; display: grid; place-items: center; color: var(--ink-2); text-align: center; padding: 16px; }
+  #loader input { margin-top: 10px; font: inherit; }
+
+  @media (max-width: 700px) {
+    header { left: 16px; top: 14px; }
+    #intro { display: none; }
+    aside { top: auto; bottom: 16px; right: 16px; width: 112px; }
+    aside canvas { width: 112px; height: 112px; }
+    #hover.on + #morph.on { display: none; }
+    footer { display: none; }
+  }
+</style>
+</head>
+<body>
+<canvas id="map" aria-label="Map of neural network weights, one thumbnail per network"></canvas>
+
+<header>
+  <h1>Weight-Space Atlas</h1>
+  <p id="intro">1,923 small networks, one per emoji, arranged by their weights.</p>
+  <p class="toggle"><a id="toWeights">weights</a> / <a id="toPixels" class="off">pixels</a></p>
+  <input id="search" type="search" placeholder="search" autocomplete="off" aria-label="Search emoji by name">
+  <span id="count"></span>
+</header>
+
+<aside>
+  <div id="hover">
+    <canvas id="hoverCanvas" width="168" height="168"></canvas>
+    <div class="name" id="hoverName"></div>
+    <div class="dim" id="hoverMeta"></div>
+  </div>
+  <div id="morph">
+    <canvas id="morphCanvas" width="64" height="64"></canvas>
+    <div class="ends"><span id="endA"></span> → <span id="endB"></span></div>
+    <input type="range" id="tslider" min="0" max="1000" value="0" aria-label="Blend">
+    <div class="links"><a id="play">pause</a><a id="clear">clear</a></div>
+  </div>
+</aside>
+
+<footer id="status">scroll to zoom, drag to move, click two to blend them</footer>
+<div id="loader">loading</div>
+
+<script>
+// BEGIN siren
+// SIREN forward pass for one network. `w` is a Float32Array holding the flat
+// parameters in order W0, b0, W1, b1, ... with Wi of shape (out, in), row-major.
+// Returns a Float32Array of size*size*3 RGB values in [0, 1], row-major, y down.
+function sirenForward(w, offset, layers, omegaFirst, omegaHidden, size, out) {
+  const nl = layers.length;
+  const views = [];
+  let o = offset;
+  for (let i = 0; i < nl; i++) {
+    const [fo, fi] = layers[i];
+    views.push({ W: o, b: o + fo * fi, fo, fi });
+    o += fo * fi + fo;
+  }
+  let maxw = 0;
+  for (const l of layers) maxw = Math.max(maxw, l[0]);
+  let a = new Float32Array(maxw), b = new Float32Array(maxw);
+  const rgb = out || new Float32Array(size * size * 3);
+  const step = size > 1 ? 2 / (size - 1) : 0;
+  const L0 = views[0];
+  // First-layer pre-activations split into an x part and a y part.
+  const colPart = new Float32Array(size * L0.fo);
+  for (let j = 0; j < size; j++) {
+    const x = -1 + j * step;
+    for (let k = 0; k < L0.fo; k++) colPart[j * L0.fo + k] = w[L0.W + k * 2] * x;
+  }
+  const rowPart = new Float32Array(L0.fo);
+  for (let r = 0; r < size; r++) {
+    const y = -1 + r * step;
+    for (let k = 0; k < L0.fo; k++) rowPart[k] = w[L0.W + k * 2 + 1] * y + w[L0.b + k];
+    for (let c = 0; c < size; c++) {
+      const cp = c * L0.fo;
+      for (let k = 0; k < L0.fo; k++) a[k] = Math.sin(omegaFirst * (colPart[cp + k] + rowPart[k]));
+      for (let i = 1; i < nl; i++) {
+        const L = views[i];
+        const last = i === nl - 1;
+        for (let q = 0; q < L.fo; q++) {
+          let s = w[L.b + q];
+          const row = L.W + q * L.fi;
+          for (let k = 0; k < L.fi; k++) s += w[row + k] * a[k];
+          b[q] = last ? s : Math.sin(omegaHidden * s);
+        }
+        const t = a; a = b; b = t;
+      }
+      const p = (r * size + c) * 3;
+      for (let ch = 0; ch < 3; ch++) {
+        const v = (a[ch] + 1) * 0.5;
+        rgb[p + ch] = v < 0 ? 0 : v > 1 ? 1 : v;
+      }
+    }
+  }
+  return rgb;
+}
+// END siren
+
+// Float16 to float32 through a lookup table.
+const HALF = (() => {
+  const t = new Float32Array(65536);
+  for (let h = 0; h < 65536; h++) {
+    const s = h & 0x8000 ? -1 : 1, e = (h >> 10) & 0x1f, f = h & 0x3ff;
+    t[h] = e === 0 ? s * f * 2 ** -24 : e === 31 ? (f ? NaN : s * Infinity) : s * (1 + f / 1024) * 2 ** (e - 15);
+  }
+  return t;
+})();
+
+function parseAtlas(buf) {
+  const dv = new DataView(buf);
+  const magic = String.fromCharCode(...new Uint8Array(buf, 0, 4));
+  if (magic !== "WSA1") throw new Error("not an atlas.bin file");
+  const len = dv.getUint32(4, true);
+  const meta = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 8, len)));
+  const h = new Uint16Array(buf, 8 + len, meta.n * meta.params_per_net);
+  const w = new Float32Array(h.length);
+  for (let i = 0; i < h.length; i++) w[i] = HALF[h[i]];
+  return { meta, w };
+}
+
+function toRGBA(rgb, size, img) {
+  const d = img || new Uint8ClampedArray(size * size * 4);
+  for (let p = 0; p < size * size; p++) {
+    d[p * 4] = Math.round(rgb[p * 3] * 255);
+    d[p * 4 + 1] = Math.round(rgb[p * 3 + 1] * 255);
+    d[p * 4 + 2] = Math.round(rgb[p * 3 + 2] * 255);
+    d[p * 4 + 3] = 255;
+  }
+  return d;
+}
+
+// Make the white background around an emoji transparent. Only near-white pixels
+// connected to the border count as background, so white inside the emoji stays.
+function cutOut(d, size) {
+  const n = size * size, bg = new Uint8Array(n), stack = [];
+  const minc = (p) => Math.min(d[p * 4], d[p * 4 + 1], d[p * 4 + 2]);
+  const push = (p) => { if (!bg[p] && minc(p) >= 232) { bg[p] = 1; stack.push(p); } };
+  for (let k = 0; k < size; k++) {
+    push(k); push(n - size + k); push(k * size); push(k * size + size - 1);
+  }
+  while (stack.length) {
+    const p = stack.pop(), r = (p / size) | 0, c = p % size;
+    if (r > 0) push(p - size);
+    if (r < size - 1) push(p + size);
+    if (c > 0) push(p - 1);
+    if (c < size - 1) push(p + 1);
+  }
+  // Fade the light anti-aliased fringe instead of cutting it hard.
+  for (let p = 0; p < n; p++) if (bg[p]) d[p * 4 + 3] = Math.max(0, Math.min(255, (246 - minc(p)) * 18));
+  return d;
+}
+
+// ---------------------------------------------------------------- app state
+const TH = 64;                       // thumbnail resolution
+const HINT = "scroll to zoom, drag to move, click two to blend them";
+const WEIGHT_LINE = "1,923 small networks, one per emoji, arranged by their weights.";
+const PIXEL_LINE = "the same 1,923 emoji, arranged by their pixels instead.";
+const $ = (id) => document.getElementById(id);
+const canvas = $("map"), ctx = canvas.getContext("2d");
+let meta, W, N, P, sprite, spriteCtx, cols;
+let ready;                           // Uint8Array: 0 none, 1 low-res, 2 full
+let view = { x: 0, y: 0, k: 1 };     // screen = world * base * k + (x, y)
+let base = 1, dpr = 1;
+let hover = -1, picks = [], query = "", matches = null;
+let dirty = true;
+let nameWords = [];
+
+
+async function load() {
+  let buf;
+  try {
+    const res = await fetch("atlas.bin", { cache: "no-cache" });   // revalidate so a rebuilt file is picked up
+    if (!res.ok) throw new Error(res.status);
+    buf = await res.arrayBuffer();
+  } catch (e) {
+    buf = await askForFile();
+  }
+  ({ meta, w: W } = parseAtlas(buf));
+  N = meta.n; P = meta.params_per_net;
+  if (!meta.pxy) { meta.pxy = meta.xy; document.querySelector(".toggle").remove(); }
+  $("loader").remove();
+  init();
+}
+
+function askForFile() {
+  const l = $("loader");
+  l.innerHTML = `<div>couldn't load atlas.bin. run python -m http.server -d web, or pick it:<br>
+    <input type="file" accept=".bin"></div>`;
+  return new Promise((resolve) => {
+    l.querySelector("input").addEventListener("change", async (e) => {
+      l.textContent = "loading";
+      resolve(await e.target.files[0].arrayBuffer());
+    });
+  });
+}
+
+function init() {
+  cols = Math.ceil(Math.sqrt(N));
+  sprite = document.createElement("canvas");
+  sprite.width = sprite.height = cols * TH;
+  spriteCtx = sprite.getContext("2d");
+  ready = new Uint8Array(N);
+  nameWords = meta.names.map((n) => n.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean));
+  // Draw from the bottom of the map up so lower thumbnails sit on top.
+  drawOrder = [...Array(N).keys()].sort((a, b) => meta.xy[b][1] - meta.xy[a][1]);
+  resize();
+  fit();
+  startWorker();
+  bindEvents();
+  requestAnimationFrame(frame);
+}
+
+// ---------------------------------------------------------------- thumbnails
+// A pool of workers renders every network, first at 16 px for a quick first
+// paint, then at full resolution. Each worker gets only its own networks'
+// weights and reuses the exact functions defined above.
+function startWorker() {
+  const src = `${sirenForward}\n${toRGBA}\n${cutOut}\n
+    onmessage = (e) => {
+      const { W, ids, layers, config: c, P } = e.data;
+      for (const size of [16, ${TH}]) {
+        const rgb = new Float32Array(size * size * 3);
+        for (let s = 0; s < ids.length; s += 16) {
+          const batch = [];
+          for (let j = s; j < Math.min(s + 16, ids.length); j++) {
+            sirenForward(W, j * P, layers, c.omega_first, c.omega_hidden, size, rgb);
+            batch.push({ i: ids[j], size, px: cutOut(toRGBA(rgb, size), size) });
+          }
+          postMessage(batch);
+        }
+      }
+      postMessage("done");
+    };`;
+  const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+  // Render the networks nearest the centre of the map first.
+  const order = [...Array(N).keys()].sort((a, b) =>
+    Math.hypot(meta.xy[a][0] - 0.5, meta.xy[a][1] - 0.5) - Math.hypot(meta.xy[b][0] - 0.5, meta.xy[b][1] - 0.5));
+  const nw = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4) - 1));
+  let done = 0, finished = 0;
+  const onmessage = (e) => {
+    if (e.data === "done") {
+      if (++finished === nw) $("status").textContent = HINT;
+      return;
+    }
+    for (const { i, size, px } of e.data) {
+      const x = (i % cols) * TH, y = Math.floor(i / cols) * TH;
+      const id = new ImageData(px, size, size);
+      if (size === TH) {
+        spriteCtx.clearRect(x, y, TH, TH);
+        spriteCtx.putImageData(id, x, y);
+        ready[i] = 2; done++;
+      } else {
+        const tmp = new OffscreenCanvas(size, size);
+        tmp.getContext("2d").putImageData(id, 0, 0);
+        spriteCtx.imageSmoothingEnabled = true;
+        spriteCtx.drawImage(tmp, x, y, TH, TH);
+        ready[i] = 1;
+      }
+    }
+    if (finished < nw) $("status").textContent = `drawing ${done} / ${N}`;
+    dirty = true;
+  };
+  for (let k = 0; k < nw; k++) {
+    const ids = order.filter((_, j) => j % nw === k);
+    const w = new Float32Array(ids.length * P);
+    ids.forEach((i, j) => w.set(W.subarray(i * P, (i + 1) * P), j * P));
+    const worker = new Worker(url);
+    worker.onmessage = onmessage;
+    worker.postMessage({ W: w, ids, layers: meta.layers, config: meta.config, P }, [w.buffer]);
+  }
+}
+
+// ---------------------------------------------------------------- view
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(innerWidth * dpr);
+  canvas.height = Math.round(innerHeight * dpr);
+  dirty = true;
+}
+
+function fit() {
+  const pad = Math.min(innerWidth, innerHeight) * 0.08;
+  base = Math.min(innerWidth, innerHeight) - pad * 2;
+  view = { k: 1, x: (innerWidth - base) / 2, y: (innerHeight - base) / 2 };
+}
+
+function thumbSize() {
+  // Thumbnails grow slower than the map so zooming in opens up space.
+  return Math.max(8, base * 0.026 * Math.pow(view.k, 0.65));
+}
+
+// Each network sits somewhere between its weight-space and pixel-space position.
+const space = { t: 0, target: 0 };   // 0 weights, 1 pixels
+function toScreen(i) {
+  const e = 0.5 - 0.5 * Math.cos(Math.PI * space.t);
+  const [wx, wy] = meta.xy[i], [px, py] = meta.pxy[i];
+  const x = wx + (px - wx) * e, y = wy + (py - wy) * e;
+  return [x * base * view.k + view.x, (1 - y) * base * view.k + view.y];
+}
+
+function setSpace(target) {
+  space.target = target;
+  $("toWeights").classList.toggle("off", target !== 0);
+  $("toPixels").classList.toggle("off", target !== 1);
+  $("intro").textContent = target ? PIXEL_LINE : WEIGHT_LINE;
+}
+
+function pick(mx, my) {
+  const s = thumbSize();
+  for (let j = N - 1; j >= 0; j--) {
+    const i = drawOrder[j];
+    const [x, y] = toScreen(i);
+    if (Math.abs(mx - x) <= s / 2 && Math.abs(my - y) <= s / 2) return i;
+  }
+  return -1;
+}
+
+let drawOrder = null;
+let lastFrame = 0;
+function frame(now) {
+  const dt = Math.min(0.05, (now - (lastFrame || now)) / 1000);
+  lastFrame = now;
+  if (space.t !== space.target) {
+    const step = dt / 1.2;             // 1.2 s from one layout to the other
+    space.t = space.target > space.t ? Math.min(space.target, space.t + step) : Math.max(space.target, space.t - step);
+    dirty = true;
+  }
+  if (dirty) { draw(); dirty = false; }
+  requestAnimationFrame(frame);
+}
+
+function draw() {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, innerWidth, innerHeight);
+  const s = thumbSize();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+
+  if (picks.length === 2) {
+    const [ax, ay] = toScreen(picks[0]), [bx, by] = toScreen(picks[1]);
+    ctx.strokeStyle = "rgba(17,17,17,0.5)";
+    ctx.setLineDash([4, 5]);
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  for (const i of drawOrder) {
+    const [x, y] = toScreen(i);
+    if (x < -s || y < -s || x > innerWidth + s || y > innerHeight + s) continue;
+    const dim = matches && !matches.has(i);
+    if (ready[i]) {
+      ctx.globalAlpha = dim ? 0.08 : 1;
+      const sx = (i % cols) * TH, sy = Math.floor(i / cols) * TH;
+      ctx.drawImage(sprite, sx, sy, TH, TH, x - s / 2, y - s / 2, s, s);
+    } else {
+      ctx.globalAlpha = dim ? 0.08 : 0.6;
+      ctx.fillStyle = "#bbb";
+      ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  const lift = (i, color, width, grow) => {
+    const [x, y] = toScreen(i), g = Math.round(s * grow);
+    const x0 = Math.round(x - g / 2), y0 = Math.round(y - g / 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(x0, y0, g, g);
+    ctx.drawImage(sprite, (i % cols) * TH, Math.floor(i / cols) * TH, TH, TH, x0, y0, g, g);
+    ctx.strokeStyle = color; ctx.lineWidth = width;
+    ctx.strokeRect(x0 - width / 2, y0 - width / 2, g + width, g + width);
+  };
+  picks.forEach((i) => lift(i, "#111", 1, 1.5));
+  if (hover >= 0 && !picks.includes(hover)) lift(hover, "#111", 1, 1.9);
+}
+
+// ---------------------------------------------------------------- panels
+const hoverRGB = new Float32Array(96 * 96 * 3);
+function showHover(i) {
+  $("hover").classList.toggle("on", i >= 0);
+  if (i < 0) return;
+  // Render the hovered network live at a higher resolution than the thumbnail.
+  const c = meta.config, size = 96, hc = $("hoverCanvas");
+  sirenForward(W, i * P, meta.layers, c.omega_first, c.omega_hidden, size, hoverRGB);
+  const tmp = new OffscreenCanvas(size, size);
+  tmp.getContext("2d").putImageData(new ImageData(toRGBA(hoverRGB, size), size, size), 0, 0);
+  const g = hc.getContext("2d");
+  g.imageSmoothingEnabled = true; g.imageSmoothingQuality = "high";
+  g.drawImage(tmp, 0, 0, hc.width, hc.height);
+  $("hoverName").textContent = meta.names[i];
+  $("hoverMeta").textContent = `${meta.psnr[i].toFixed(1)} dB`;
+}
+
+const MS = 64;                       // morph resolution, kept low so it animates smoothly
+const morph = { t: 0, playing: true, last: 0, mix: null, rgb: new Float32Array(MS * MS * 3), px: null };
+function setPicks(i) {
+  if (picks.length === 2) picks = [];
+  if (picks.length === 1 && picks[0] === i) return;
+  picks.push(i);
+  $("endA").textContent = meta.names[picks[0]];
+  $("endB").textContent = picks.length === 2 ? meta.names[picks[1]] : "?";
+  $("morph").classList.add("on");
+  if (picks.length === 2) {
+    morph.t = 0; morph.phase = 0; morph.playing = true; $("play").textContent = "pause";
+    renderMorph();
+  } else {
+    $("morphCanvas").getContext("2d").clearRect(0, 0, MS, MS);
+  }
+  dirty = true;
+}
+
+function renderMorph() {
+  if (picks.length < 2) return;
+  if (!morph.mix) morph.mix = new Float32Array(P);
+  // Ease so the animation lingers near each end.
+  const t = morph.t, e = 0.5 - 0.5 * Math.cos(Math.PI * t);
+  const a = picks[0] * P, b = picks[1] * P, m = morph.mix;
+  for (let k = 0; k < P; k++) m[k] = (1 - e) * W[a + k] + e * W[b + k];
+  const c = meta.config;
+  sirenForward(m, 0, meta.layers, c.omega_first, c.omega_hidden, MS, morph.rgb);
+  morph.px = toRGBA(morph.rgb, MS, morph.px || undefined);
+  $("morphCanvas").getContext("2d").putImageData(new ImageData(morph.px, MS, MS), 0, 0);
+  $("tslider").value = Math.round(t * 1000);
+}
+
+function animate(now) {
+  if (picks.length === 2 && morph.playing) {
+    const dt = Math.min(0.05, (now - (morph.last || now)) / 1000);
+    morph.phase = ((morph.phase || 0) + dt / 4) % 1;   // 4 s per round trip
+    morph.t = morph.phase < 0.5 ? morph.phase * 2 : 2 - morph.phase * 2;
+    renderMorph();
+  }
+  morph.last = now;
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+
+// ---------------------------------------------------------------- input
+function bindEvents() {
+  addEventListener("resize", () => { const k = view.k, cx = (innerWidth / 2 - view.x) / (base * k), cy = (innerHeight / 2 - view.y) / (base * k);
+    resize(); fit(); view.k = k; view.x = innerWidth / 2 - cx * base * k; view.y = innerHeight / 2 - cy * base * k; });
+
+  const zoomAt = (mx, my, f) => {
+    const k = Math.min(40, Math.max(0.5, view.k * f));
+    f = k / view.k;
+    view.x = mx - (mx - view.x) * f;
+    view.y = my - (my - view.y) * f;
+    view.k = k;
+    dirty = true;
+  };
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0018)));
+  }, { passive: false });
+
+  const pointers = new Map();
+  let drag = null, moved = 0, pinch = null;
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pointers.size === 1) { drag = [e.clientX, e.clientY]; moved = 0; }
+    if (pointers.size === 2) {
+      const [p, q] = [...pointers.values()];
+      pinch = Math.hypot(p[0] - q[0], p[1] - q[1]); drag = null;
+    }
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (pointers.has(e.pointerId)) pointers.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pinch && pointers.size === 2) {
+      const [p, q] = [...pointers.values()];
+      const d = Math.hypot(p[0] - q[0], p[1] - q[1]);
+      zoomAt((p[0] + q[0]) / 2, (p[1] + q[1]) / 2, d / pinch);
+      pinch = d; return;
+    }
+    if (drag) {
+      const dx = e.clientX - drag[0], dy = e.clientY - drag[1];
+      moved += Math.abs(dx) + Math.abs(dy);
+      if (moved > 3) {
+        canvas.classList.add("dragging");
+        view.x += dx; view.y += dy; dirty = true;
+      }
+      drag = [e.clientX, e.clientY];
+      if (moved > 3) return;
+    }
+    const i = pick(e.clientX, e.clientY);
+    canvas.classList.toggle("over", i >= 0);
+    if (i !== hover) { hover = i; showHover(i); dirty = true; }
+  });
+  const end = (e) => {
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) pinch = null;
+    if (drag && moved <= 3) {
+      const i = pick(e.clientX, e.clientY);
+      if (i >= 0) setPicks(i);
+    }
+    drag = null; canvas.classList.remove("dragging");
+  };
+  canvas.addEventListener("pointerup", end);
+  canvas.addEventListener("pointercancel", end);
+  canvas.addEventListener("pointerleave", () => { if (!drag && hover >= 0) { hover = -1; showHover(-1); dirty = true; } });
+  canvas.addEventListener("dblclick", (e) => zoomAt(e.clientX, e.clientY, 2));
+
+  $("tslider").addEventListener("input", (e) => {
+    morph.playing = false; $("play").textContent = "play";
+    morph.t = e.target.value / 1000; morph.phase = morph.t / 2; renderMorph();
+  });
+  $("play").addEventListener("click", () => {
+    morph.playing = !morph.playing; $("play").textContent = morph.playing ? "pause" : "play";
+  });
+  $("clear").addEventListener("click", () => {
+    picks = []; $("morph").classList.remove("on");
+    dirty = true;
+  });
+  $("toWeights").addEventListener("click", () => setSpace(0));
+  $("toPixels").addEventListener("click", () => setSpace(1));
+  $("search").addEventListener("input", (e) => {
+    // Every typed word has to match the start of a word in the name, so "ice"
+    // finds "ice cream" and "shaved ice" but not "service dog".
+    query = e.target.value.trim().toLowerCase();
+    const terms = query.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    matches = terms.length ? new Set([...Array(N).keys()].filter((i) =>
+      terms.every((t) => nameWords[i].some((w) => w.startsWith(t))))) : null;
+    $("count").textContent = matches ? ` ${matches.size}` : "";
+    dirty = true;
+  });
+  addEventListener("keydown", (e) => {
+    if (e.key === "Escape") $("clear").click();
+    if (e.key === "0" && document.activeElement !== $("search")) { fit(); dirty = true; }
+  });
+}
+
+load();
+</script>
+</body>
+</html>
