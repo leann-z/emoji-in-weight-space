@@ -1,8 +1,8 @@
 # Emoji in Weight Space
 
-A map of 1,923 neural networks, each fit to one emoji, laid out by their weights. [Live demo](https://leann-z.github.io/weightspace-map/).
+A map of 1,923 neural networks, each fit to one emoji, laid out by their weights. [Live demo](https://leann-z.github.io/emoji-in-weight-space/).
 
-[![The interactive map, with a hovered network and a weight-space morph](media/page.png)](https://leann-z.github.io/weightspace-map/)
+[![The interactive map, with a hovered network and a weight-space morph](media/page.png)](https://leann-z.github.io/emoji-in-weight-space/)
 
 ## Overview
 
