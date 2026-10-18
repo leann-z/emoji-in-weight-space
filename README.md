@@ -8,6 +8,8 @@ A map of 1,923 neural networks, each fit to one emoji, laid out by their weights
 
 An implicit neural representation (INR) stores an image as the weights of a small network that maps a pixel coordinate (x, y) to its RGB color. I fit one INR per emoji, embed the 1,923 weight vectors in 2D, and draw each network's own rendering at its position, giving a browsable map of weight space. An extra training term makes linear interpolation between any two networks' weights render as a cross-fade of their images.
 
+The question underneath is how much of what a network has learned can be read directly from its parameters. Here, networks that draw similar emoji end up near each other in weight space (23% shared nearest neighbors in 2D against 0.5% chance), so the weights carry recoverable structure about the function they implement, provided permutation symmetry is controlled for.
+
 ## Method
 
 - **Data:** 1,923 [Noto Emoji](https://github.com/googlefonts/noto-emoji), 64x64.
